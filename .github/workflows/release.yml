@@ -61,7 +61,8 @@ jobs:
           "-DNUGET_PUBLISH_SOURCE_URL=${{env.NUGET_FEED_URL}}" \
           "-DSWIG_DIR=${{steps.la_swig.outputs.swig_dir}}" \
           "-DCU_REPO_URL=https://github.com/${{github.repository}}" \
-          "-DSWIG_EXECUTABLE=${{steps.la_swig.outputs.swig_exec}}" 
+          "-DSWIG_EXECUTABLE=${{steps.la_swig.outputs.swig_exec}}" \
+          "-DNIH_NUGET_DEPENDENCY=la_networkInterfaceHelp-linux-$arch"
 
     - name: Build All
       # Build your program with the given configuration
@@ -117,7 +118,8 @@ jobs:
           "-DNUGET_PUBLISH_SOURCE_URL=${{env.NUGET_FEED_URL}}" \
           "-DSWIG_DIR=${{steps.la_swig.outputs.swig_dir}}" \
           "-DCU_REPO_URL=https://github.com/${{github.repository}}" \
-          "-DSWIG_EXECUTABLE=${{steps.la_swig.outputs.swig_exec}}"
+          "-DSWIG_EXECUTABLE=${{steps.la_swig.outputs.swig_exec}}" \
+          "-DNIH_NUGET_DEPENDENCY=la_networkInterfaceHelp-win-$arch"
 
     - name: Build All
       # Build your program with the given configuration
@@ -168,7 +170,8 @@ jobs:
           "-DNUGET_PUBLISH_SOURCE_URL=${{env.NUGET_FEED_URL}}" \
           "-DSWIG_DIR=${{steps.la_swig.outputs.swig_dir}}" \
           "-DCU_REPO_URL=https://github.com/${{github.repository}}" \
-          "-DSWIG_EXECUTABLE=${{steps.la_swig.outputs.swig_exec}}" 
+          "-DSWIG_EXECUTABLE=${{steps.la_swig.outputs.swig_exec}}" \
+          "-DNIH_NUGET_DEPENDENCY=la_networkInterfaceHelp-osx"
 
     - name: Build All
       run: cmake --build ${{env.build_dir}}
