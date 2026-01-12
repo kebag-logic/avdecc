@@ -26,6 +26,7 @@
 #include "la/avdecc/watchDog.hpp"
 
 #include <unordered_map>
+#include <ctime>
 #include <thread>
 #include <string>
 #include <iostream>
@@ -47,7 +48,8 @@ private:
 	{
 		std::chrono::milliseconds maximumInterval{ 0u };
 		std::thread::id threadId{};
-		std::chrono::time_point<std::chrono::system_clock> lastAlive{ std::chrono::system_clock::now() };
+		std::clock_t lastAlive = std::clock();
+		//std::chrono::time_point<std::chrono::steady_clock> lastAlive{ std::chrono::steady_clock::now() };
 		bool ignore{ false };
 	};
 
@@ -65,7 +67,8 @@ public:
 					{
 						auto const lg = std::lock_guard{ _lock };
 
-						auto const currentTime = std::chrono::system_clock::now();
+						std::clock_t currentTime = std::clock();
+						//auto const currentTime = std::chrono::steady_clock::now();
 						for (auto& [threadId, watchedMap] : _watched)
 						{
 							for (auto& [name, watchInfo] : watchedMap)
@@ -77,7 +80,8 @@ public:
 								}
 
 								// Check if we timed out
-								if (!watchInfo.ignore && std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - watchInfo.lastAlive).count() > watchInfo.maximumInterval.count())
+								if (!watchInfo.ignore && ((currentTime - watchInfo.lastAlive) / CLOCKS_PER_SEC) > watchInfo.maximumInterval.count())
+								//if (!watchInfo.ignore && std::chrono::duration_cast<std::chrono::milliseconds>(currentTime - watchInfo.lastAlive).count() > watchInfo.maximumInterval.count())
 								{
 									_observers.notifyObserversMethod<Observer>(&Observer::onIntervalExceeded, name, watchInfo.maximumInterval);
 
@@ -173,7 +177,7 @@ private:
 			if (auto watchedIt = watchedThread.find(name); AVDECC_ASSERT_WITH_RET(watchedIt != watchedThread.end(), "Cannot alive, 'name' not found"))
 			{
 				watchedIt->second.threadId = thisId;
-				watchedIt->second.lastAlive = std::chrono::system_clock::now();
+				watchedIt->second.lastAlive = std::clock();
 			}
 		}
 	}
