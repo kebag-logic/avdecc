@@ -33,6 +33,7 @@
 #include "stateMachine/stateMachineManager.hpp"
 #include "ethernetPacketDispatch.hpp"
 #include "protocolInterface_virtual.hpp"
+#include "vlanTagging.hpp"
 #include "logHelper.hpp"
 
 #include <stdexcept>
@@ -894,24 +895,30 @@ void ProtocolInterfaceVirtualImpl::processRawPacket(la::avdecc::MemoryBuffer&& p
 	la::avdecc::ExecutorManager::getInstance().pushJob(getExecutorName(),
 		[this, msg = std::move(packet)]()
 		{
-			// Packet received, process it
-			auto des = DeserializationBuffer(msg);
-			EtherLayer2 etherLayer2;
-			deserialize<EtherLayer2>(&etherLayer2, des);
+			// Packet received, process it.
+			// Parse DestAddress + SrcAddress + optional 802.1Q/802.1ad tag stack + EtherType. The header
+			// length is computed, not assumed, since the frame may carry up to two VLAN tags.
+			auto header = vlan::RxHeader{};
+			if (!vlan::parseHeader(msg.data(), msg.size(), header))
+			{
+				return; // Runt frame, unsupported tag stack depth, truncated tag, or no payload
+			}
+
+			auto etherLayer2 = EtherLayer2{};
+			vlan::fillEtherLayer2(msg.data(), header, etherLayer2);
 
 			// Only accept message for my MacAddress or the broadcast address
 			auto const& destAddress = etherLayer2.getDestAddress();
 			if (destAddress == getMacAddress() || destAddress == Multicast_Mac_Address || destAddress == Identify_Mac_Address)
 			{
 				// Check ether type (shouldn't be needed, pcap filter is active)
-				std::uint16_t etherType = AVDECC_UNPACK_TYPE(*((std::uint16_t*)(msg.data() + 12)), std::uint16_t);
-				if (etherType != AvtpEtherType)
+				if (header.etherType != AvtpEtherType)
 				{
 					return;
 				}
 
-				std::uint8_t const* avtpdu = msg.data() + 14; // Start of AVB Transport Protocol
-				auto avtpdu_size = msg.size() - 14;
+				std::uint8_t const* avtpdu = msg.data() + header.headerLength; // Start of AVB Transport Protocol
+				auto avtpdu_size = msg.size() - header.headerLength; // parseHeader guarantees msg.size() > headerLength
 				// Check AVTP control bit (meaning AVDECC packet)
 				std::uint8_t avtp_sub_type_control = avtpdu[0];
 				if ((avtp_sub_type_control & 0xF0) == 0)
