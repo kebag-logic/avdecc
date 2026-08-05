@@ -160,6 +160,184 @@ inline void fillEtherLayer2(std::uint8_t const* const data, RxHeader const& head
 	etherLayer2.setEtherType(header.etherType); // The true EtherType, never a TPID
 }
 
+/** Serializes 'count' tags into 'out' (which must hold at least count * TagLength bytes). Returns the number of bytes written. */
+inline std::size_t buildTagBytes(Tag const* const tags, std::size_t const count, std::uint8_t* const out) noexcept
+{
+	auto position = std::size_t{ 0u };
+
+	for (auto index = std::size_t{ 0u }; index < count && index < MaxTags; ++index)
+	{
+		auto const tci = tags[index].tci();
+		out[position++] = static_cast<std::uint8_t>(tags[index].tpid >> 8);
+		out[position++] = static_cast<std::uint8_t>(tags[index].tpid & 0xffu);
+		out[position++] = static_cast<std::uint8_t>(tci >> 8);
+		out[position++] = static_cast<std::uint8_t>(tci & 0xffu);
+	}
+
+	return position;
+}
+
+/** Parses an unsigned integer in the given base from the [begin, end) range. Returns false on any invalid character or overflow. */
+inline bool parseUint(char const* begin, char const* const end, unsigned const base, unsigned long& out) noexcept
+{
+	if (begin == nullptr || end == nullptr || begin >= end)
+	{
+		return false;
+	}
+
+	auto value = 0ul;
+	for (; begin < end; ++begin)
+	{
+		auto const character = *begin;
+		auto digit = 0u;
+		if (character >= '0' && character <= '9')
+		{
+			digit = static_cast<unsigned>(character - '0');
+		}
+		else if (character >= 'a' && character <= 'f')
+		{
+			digit = static_cast<unsigned>(character - 'a') + 10u;
+		}
+		else if (character >= 'A' && character <= 'F')
+		{
+			digit = static_cast<unsigned>(character - 'A') + 10u;
+		}
+		else
+		{
+			return false;
+		}
+		if (digit >= base)
+		{
+			return false;
+		}
+		value = value * base + digit;
+		if (value > 0xffffful)
+		{
+			return false; // Far beyond anything valid, bail out rather than wrap
+		}
+	}
+
+	out = value;
+	return true;
+}
+
+/**
+* @brief Parses a TX tag stack specification.
+* @details Grammar: [tpid:]vid[.pcp] [ , [tpid:]vid[.pcp] ]
+*          A single entry is a C-TAG, two entries are an 802.1ad stack whose outer tag defaults to
+*          the S-TAG TPID and whose inner tag defaults to the C-TAG TPID. 'tpid' is hexadecimal,
+*          'vid' and 'pcp' are decimal. Examples: "8", "8.6", "100,8", "88a8:100,8100:8.6".
+* @return true on success. On any malformed input this returns false and sets count to 0, so a
+*         caller that ignores the return value stays untagged rather than emitting a wrong tag.
+*/
+inline bool parseTagStackSpec(char const* const spec, std::array<Tag, MaxTags>& tags, std::uint8_t& count) noexcept
+{
+	count = 0u;
+
+	if (spec == nullptr || *spec == '\0')
+	{
+		return false;
+	}
+
+	auto parsed = std::array<Tag, MaxTags>{};
+	auto explicitTpid = std::array<bool, MaxTags>{};
+	auto parsedCount = std::size_t{ 0u };
+	auto const* cursor = spec;
+
+	while (*cursor != '\0')
+	{
+		if (parsedCount >= MaxTags)
+		{
+			return false; // Stack deeper than 802.1ad Q-in-Q
+		}
+
+		auto const* fieldEnd = cursor;
+		while (*fieldEnd != '\0' && *fieldEnd != ',')
+		{
+			++fieldEnd;
+		}
+		if (fieldEnd == cursor)
+		{
+			return false; // Empty field
+		}
+
+		auto tag = Tag{};
+		auto const* position = cursor;
+
+		// Optional "tpid:" prefix, hexadecimal
+		auto const* colon = cursor;
+		while (colon < fieldEnd && *colon != ':')
+		{
+			++colon;
+		}
+		if (colon < fieldEnd)
+		{
+			auto value = 0ul;
+			if (!parseUint(position, colon, 16u, value) || !isTpid(static_cast<std::uint16_t>(value)))
+			{
+				return false;
+			}
+			tag.tpid = static_cast<std::uint16_t>(value);
+			explicitTpid[parsedCount] = true;
+			position = colon + 1;
+		}
+
+		// Mandatory decimal vid, optional ".pcp"
+		auto const* dot = position;
+		while (dot < fieldEnd && *dot != '.')
+		{
+			++dot;
+		}
+		auto vid = 0ul;
+		if (!parseUint(position, dot, 10u, vid) || vid < 1ul || vid > 4094ul)
+		{
+			return false;
+		}
+		tag.vid = static_cast<std::uint16_t>(vid);
+
+		if (dot < fieldEnd)
+		{
+			auto pcp = 0ul;
+			if (!parseUint(dot + 1, fieldEnd, 10u, pcp) || pcp > 7ul)
+			{
+				return false;
+			}
+			tag.pcp = static_cast<std::uint8_t>(pcp);
+		}
+
+		parsed[parsedCount] = tag;
+		++parsedCount;
+
+		cursor = fieldEnd;
+		if (*cursor == ',')
+		{
+			++cursor;
+			if (*cursor == '\0')
+			{
+				return false; // Trailing comma
+			}
+		}
+	}
+
+	if (parsedCount == 0u)
+	{
+		return false;
+	}
+
+	// Apply default TPIDs now that the stack depth is known
+	for (auto index = std::size_t{ 0u }; index < parsedCount; ++index)
+	{
+		if (!explicitTpid[index])
+		{
+			parsed[index].tpid = (parsedCount == 2u && index == 0u) ? Tpid_STag : Tpid_CTag;
+		}
+	}
+
+	tags = parsed;
+	count = static_cast<std::uint8_t>(parsedCount);
+	return true;
+}
+
 /**
 * @brief Returns the pcap capture filter accepting AVDECC control frames, tagged or not.
 * @details The untagged branch is intentionally identical to the historical filter so the
