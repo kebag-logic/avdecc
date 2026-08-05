@@ -74,6 +74,23 @@ public:
 		// Should always be supported. Cannot create a PCap ProtocolInterface if it's not supported.
 		AVDECC_ASSERT(isSupported(), "Should always be supported. Cannot create a PCap ProtocolInterface if it's not supported");
 
+		// Optional transmit VLAN tagging, configured through the environment so it can be used before
+		// a proper configuration API exists. Grammar: [tpid:]vid[.pcp][,[tpid:]vid[.pcp]]
+		// eg. AVDECC_VLAN=8 (C-TAG vlan 8), AVDECC_VLAN=8.6 (vlan 8 priority 6), AVDECC_VLAN=100,8 (802.1ad Q-in-Q)
+		// Parsing failures leave the interface untagged rather than emitting a wrong tag.
+		if (auto const* const vlanSpec = std::getenv("AVDECC_VLAN"); vlanSpec != nullptr)
+		{
+			if (vlan::parseTagStackSpec(vlanSpec, _txTags, _txTagCount))
+			{
+				LOG_PROTOCOL_INTERFACE_INFO(networkInterface::MacAddress{}, networkInterface::MacAddress{}, "Transmitting AVDECC frames with {} VLAN tag(s) from AVDECC_VLAN='{}'", _txTagCount, vlanSpec);
+			}
+			else
+			{
+				_txTagCount = 0u;
+				LOG_PROTOCOL_INTERFACE_WARN(networkInterface::MacAddress{}, networkInterface::MacAddress{}, "Ignoring malformed AVDECC_VLAN='{}', transmitting untagged", vlanSpec);
+			}
+		}
+
 		// Open pcap on specified network interface
 		std::array<char, PCAP_ERRBUF_SIZE> errbuf;
 #ifdef _WIN32
@@ -694,21 +711,54 @@ private:
 	Error sendPacket(SerializationBuffer const& buffer) const noexcept
 	{
 		auto length = buffer.size();
+		// IEEE 802.3 minimum frame is 64 octets including the FCS, ie. 60 octets of frame data. VLAN tag
+		// octets count toward that minimum, so this floor is flat and must NOT grow with the tag stack.
 		constexpr auto minimumSize = EthernetPayloadMinimumSize + EtherLayer2::HeaderLength;
-
-		/* Check the buffer has enough bytes in it */
-		if (length < minimumSize)
-			length = minimumSize; // No need to resize nor pad the buffer, it has enough capacity and we don't care about the unused bytes. Simply increase the length of the data to send.
 
 		try
 		{
 			auto* const pcap = _pcap.get();
 			AVDECC_ASSERT(pcap, "Trying to send a message but pcapLibrary has been uninitialized");
-			if (pcap != nullptr)
+			if (pcap == nullptr)
 			{
+				return Error::TransportError;
+			}
+
+			if (_txTagCount == 0u)
+			{
+				/* Check the buffer has enough bytes in it */
+				if (length < minimumSize)
+					length = minimumSize; // No need to resize nor pad the buffer, it has enough capacity and we don't care about the unused bytes. Simply increase the length of the data to send.
+
 				if (_pcapLibrary.sendpacket(pcap, buffer.data(), static_cast<int>(length)) == 0)
 					return Error::NoError;
+				return Error::TransportError;
 			}
+
+			// Splice the VLAN tag stack between SrcAddress and EtherType. This is done on the raw bytes at
+			// the very edge of the transport so the AVTPDU classes and all their size computations stay
+			// completely unaware of tagging.
+			auto tagBytes = std::array<std::uint8_t, vlan::MaxTags * vlan::TagLength>{};
+			auto const tagLength = vlan::buildTagBytes(_txTags.data(), _txTagCount, tagBytes.data());
+
+			if (length < vlan::UntaggedHeaderLength || (length + tagLength) > TxStagingSize)
+			{
+				return Error::InternalError;
+			}
+
+			// Value-initialized on each call so any padding octets are zero
+			auto staging = std::array<std::uint8_t, TxStagingSize>{};
+			constexpr auto addressesLength = std::size_t{ 12u }; // DestAddress + SrcAddress
+			std::memcpy(staging.data(), buffer.data(), addressesLength);
+			std::memcpy(staging.data() + addressesLength, tagBytes.data(), tagLength);
+			std::memcpy(staging.data() + addressesLength + tagLength, buffer.data() + addressesLength, length - addressesLength);
+
+			auto sendLength = length + tagLength;
+			if (sendLength < minimumSize)
+				sendLength = minimumSize;
+
+			if (_pcapLibrary.sendpacket(pcap, staging.data(), static_cast<int>(sendLength)) == 0)
+				return Error::NoError;
 		}
 		catch (...)
 		{
@@ -716,7 +766,13 @@ private:
 		return Error::TransportError;
 	}
 
+	// Private constants
+	/** Staging buffer size for transmit tagging: a maximum sized ethernet frame plus a full tag stack */
+	static constexpr auto TxStagingSize = static_cast<std::size_t>(EthernetMaxFrameSize) + (vlan::MaxTags * vlan::TagLength);
+
 	// Private variables
+	std::array<vlan::Tag, vlan::MaxTags> _txTags{}; /**< VLAN tag stack applied to transmitted frames */
+	std::uint8_t _txTagCount{ 0u }; /**< Number of tags in _txTags, 0 means transmit untagged */
 	watchDog::WatchDog::SharedPointer _watchDogSharedPointer{ watchDog::WatchDog::getInstance() };
 	watchDog::WatchDog& _watchDog{ *_watchDogSharedPointer };
 	PcapInterface _pcapLibrary;

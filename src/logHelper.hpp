@@ -120,6 +120,7 @@ constexpr void log(Ts&&... params)
 #	define LOG_PROTOCOL_INTERFACE_TRACE(Source, Dest, ...)
 #	define LOG_PROTOCOL_INTERFACE_DEBUG(Source, Dest, ...)
 #endif // DEBUG
+#define LOG_PROTOCOL_INTERFACE_INFO(Source, Dest, ...) LOG_PROTOCOL_INTERFACE(Info, Source, Dest, __VA_ARGS__)
 #define LOG_PROTOCOL_INTERFACE_WARN(Source, Dest, ...) LOG_PROTOCOL_INTERFACE(Warn, Source, Dest, __VA_ARGS__)
 #define LOG_PROTOCOL_INTERFACE_ERROR(Source, Dest, ...) LOG_PROTOCOL_INTERFACE(Error, Source, Dest, __VA_ARGS__)
 
