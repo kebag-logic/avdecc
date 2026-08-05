@@ -33,6 +33,7 @@
 #include "ethernetPacketDispatch.hpp"
 #include "protocolInterface_pcap.hpp"
 #include "pcapInterface.hpp"
+#include "vlanTagging.hpp"
 #include "logHelper.hpp"
 
 #include <stdexcept>
@@ -97,12 +98,19 @@ public:
 			throw Exception(Error::TransportError, errbuf.data());
 		}
 
-		// Configure pcap filtering to ignore packets of other protocols
+		// Configure pcap filtering to ignore packets of other protocols.
+		// Accepts untagged, 802.1Q and 802.1ad (Q-in-Q) tagged AVDECC control frames: depending on the
+		// switch port configuration and on whether the capture path preserved the tag, AVDECC frames may
+		// reach us with up to two VLAN tags inserted between SrcAddress and EtherType.
 		struct bpf_program fcode;
-		std::stringstream ss;
-		ss << "ether proto 0x" << std::hex << AvtpEtherType;
-		if (_pcapLibrary.compile(pcap, &fcode, ss.str().c_str(), 1, 0xffffffff) < 0)
-			throw Exception(Error::TransportError, "Failed to compile ether filter");
+		if (_pcapLibrary.compile(pcap, &fcode, vlan::captureFilter(), 1, 0xffffffff) < 0)
+		{
+			// Never let a filter syntax limitation make the whole PCap interface unavailable: fallback to
+			// the historical untagged-only filter (VLAN tagged frames won't be received in that case).
+			LOG_PROTOCOL_INTERFACE_WARN(networkInterface::MacAddress{}, networkInterface::MacAddress{}, "Failed to compile VLAN aware ether filter, falling back to untagged-only filter (VLAN tagged AVDECC frames will not be received)");
+			if (_pcapLibrary.compile(pcap, &fcode, vlan::legacyCaptureFilter(), 1, 0xffffffff) < 0)
+				throw Exception(Error::TransportError, "Failed to compile ether filter");
+		}
 		if (_pcapLibrary.setfilter(pcap, &fcode) < 0)
 			throw Exception(Error::TransportError, "Failed to set ether filter");
 		_pcapLibrary.freecode(&fcode);
@@ -636,22 +644,28 @@ private:
 		la::avdecc::ExecutorManager::getInstance().pushJob(getExecutorName(),
 			[this, msg = std::move(packet)]()
 			{
-				// Packet received, process it
-				auto des = DeserializationBuffer(msg);
-				EtherLayer2 etherLayer2;
-				deserialize<EtherLayer2>(&etherLayer2, des);
+				// Packet received, process it.
+				// Parse DestAddress + SrcAddress + optional 802.1Q/802.1ad tag stack + EtherType. The header
+				// length is computed, not assumed, since the frame may carry up to two VLAN tags.
+				auto header = vlan::RxHeader{};
+				if (!vlan::parseHeader(msg.data(), msg.size(), header))
+				{
+					return; // Runt frame, unsupported tag stack depth, truncated tag, or no payload
+				}
 
 				// Don't ignore self mac, another entity might be on the computer
 
 				// Check ether type (shouldn't be needed, pcap filter is active)
-				std::uint16_t etherType = AVDECC_UNPACK_TYPE(*((std::uint16_t*)(msg.data() + 12)), std::uint16_t);
-				if (etherType != AvtpEtherType)
+				if (header.etherType != AvtpEtherType)
 				{
 					return;
 				}
 
-				std::uint8_t const* avtpdu = msg.data() + 14; // Start of AVB Transport Protocol
-				auto avtpdu_size = msg.size() - 14;
+				auto etherLayer2 = EtherLayer2{};
+				vlan::fillEtherLayer2(msg.data(), header, etherLayer2);
+
+				std::uint8_t const* avtpdu = msg.data() + header.headerLength; // Start of AVB Transport Protocol
+				auto avtpdu_size = msg.size() - header.headerLength; // parseHeader guarantees msg.size() > headerLength
 				// Check AVTP control bit (meaning AVDECC packet)
 				std::uint8_t avtp_sub_type_control = avtpdu[0];
 				if ((avtp_sub_type_control & 0xF0) == 0)
